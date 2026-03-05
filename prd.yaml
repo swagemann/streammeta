@@ -1,0 +1,265 @@
+# PRD: dbt YAML Editor — Databricks App
+
+## Problem
+
+Our dbt YAML governance workflow currently runs as a local Streamlit app against a cloned ADO repo. This limits access to whoever has the repo cloned locally and blocks adoption by analysts and non-engineers. Additionally, dbt tags defined in YAML do not sync to Databricks Unity Catalog automatically — only descriptions do — creating metadata drift between dbt and UC.
+
+## Solution
+
+Rewrite the app as a centrally deployed **Databricks App** that uses the **Azure DevOps REST API** (`ado_git_client.py`) instead of local filesystem Git operations, and adds **Unity Catalog tag sync** as a first-class feature.
+
+---
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────┐
+│  Databricks App (Streamlit)                         │
+│                                                     │
+│  ┌──────────┐  ┌──────────┐  ┌───────────────────┐ │
+│  │ YAML     │  │ ADO Git  │  │ UC Tag Sync       │ │
+│  │ Editor   │──│ Client   │  │ (Databricks SQL)  │ │
+│  │ UI       │  │ (REST)   │  │                   │ │
+│  └──────────┘  └──────────┘  └───────────────────┘ │
+│       │              │                │             │
+└───────┼──────────────┼────────────────┼─────────────┘
+        │              │                │
+   st.session_state    │          Databricks SQL
+                       │          Warehouse
+                Azure DevOps
+                Git REST API
+```
+
+### Key Dependencies
+
+| Component | Purpose |
+|---|---|
+| `ado_git_client.py` | All Git operations via ADO REST API (read, branch, push, PR) |
+| Databricks Secrets | Store ADO PAT (`scope: ado, key: pat`) |
+| Databricks SQL Warehouse | Execute `ALTER TABLE SET TAGS` for UC sync |
+| `databricks-sdk` | UC catalog/schema/table introspection and SQL execution |
+| `ruamel.yaml` | YAML parsing that preserves comments and formatting |
+
+---
+
+## User Workflow
+
+### 1. Browse & Select
+
+- App loads → calls `client.list_yaml_files("/models")` → populates sidebar dropdown
+- Dropdown shows full paths grouped by folder (e.g. `staging/`, `marts/`)
+- User selects a file → app calls `client.get_file(path, branch)` → raw YAML loaded into session state
+- Branch selector defaults to `main`, allows switching to any existing branch
+
+### 2. View & Edit
+
+The YAML is parsed with `ruamel.yaml` (preserves comments) and rendered as a structured form, NOT a raw text editor. Each model/source in the file gets a section with:
+
+- **Name** — read-only display
+- **Description** — `st.text_area`
+- **Tags** — `st.multiselect` with existing tags as options + free-text entry
+- **Meta** — key-value editor (optional, expandable)
+- **Columns** — nested expanders, each with:
+  - Description — `st.text_area`
+  - Tags — `st.multiselect`
+  - Tests — checklist (`not_null`, `unique`, `accepted_values`, custom) with parameter inputs
+  - Meta — key-value editor
+
+A "Raw YAML" toggle shows the rendered output for review before commit.
+
+### 3. Commit & PR
+
+- User clicks **Save** → app validates YAML (schema check + `ruamel.yaml` round-trip) 
+- Prompts for: branch name (auto-suggested from file path), commit message, PR title
+- Calls `client.edit_and_pr()` which: creates branch → pushes file → opens PR
+- Displays PR link on success
+- If branch already exists (WIP edits), pushes additional commits to the same branch
+
+### 4. Tag Sync to Unity Catalog
+
+After save (or via a dedicated **Sync Tags** button):
+
+- App reads tags from the edited YAML
+- Maps dbt model name → UC three-part table name (`catalog.schema.table`)
+  - Mapping strategy: configurable in app settings, default convention is `{catalog}.{schema}.{model_name}`
+  - Falls back to `manifest.json` lookup if available
+- Executes SQL against the Databricks SQL warehouse:
+
+```sql
+-- Model-level tags
+ALTER TABLE catalog.schema.table_name SET TAGS ('tag_name' = 'true');
+
+-- Column-level tags  
+ALTER TABLE catalog.schema.table_name ALTER COLUMN col_name SET TAGS ('pii' = 'true');
+```
+
+**Tag key-value convention:** dbt tags are flat strings. Map them as `tag_name = 'true'`. If a tag contains a colon (e.g. `domain:finance`), split into `key = value`.
+
+---
+
+## Pages / Navigation
+
+| Page | Purpose |
+|---|---|
+| **Editor** (default) | Browse, edit, commit YAML files |
+| **Tag Sync** | Bulk sync — select models, preview tag diff (YAML vs UC), apply |
+| **Settings** | ADO connection config, UC catalog mapping, default reviewers, tag conventions |
+
+---
+
+## Session State Design
+
+All repo data lives in `st.session_state` — no disk I/O.
+
+```python
+st.session_state = {
+    # ADO client (initialized once)
+    "client": ADOGitClient(...),
+    
+    # Repo browsing
+    "yaml_files": [...],           # cached file list
+    "current_branch": "main",
+    "selected_file": "/models/...",
+    
+    # Editing
+    "raw_yaml": "...",             # original content from ADO
+    "parsed_yaml": {...},          # ruamel.yaml parsed object
+    "has_unsaved_changes": False,
+    
+    # Working branch for multi-file edits
+    "working_branch": None,
+    "pending_commits": [],
+}
+```
+
+---
+
+## Configuration
+
+Stored as a YAML config file within the Databricks App deployment (or a Databricks secret for sensitive values).
+
+```yaml
+ado:
+  org: "my-org"
+  project: "my-project"  
+  repo: "my-dbt-repo"
+  default_branch: "main"
+  # PAT pulled from Databricks Secrets at runtime
+
+unity_catalog:
+  default_catalog: "analytics"
+  sql_warehouse_id: "abc123"
+  model_to_table_map:
+    # Optional explicit overrides
+    stg_orders: "analytics.staging.stg_orders"
+  naming_convention: "{catalog}.{schema}.{model_name}"
+
+editor:
+  default_reviewers: ["user@company.com"]
+  branch_prefix: "yaml-edit/"
+  tag_delimiter: ":"  # for splitting "domain:finance" → key:value
+```
+
+---
+
+## YAML Parsing Rules
+
+Use `ruamel.yaml` (not `PyYAML`) to preserve:
+- Comments (inline and block)
+- Key ordering
+- Formatting and indentation style
+
+Round-trip fidelity is critical — a save that changes only a description should produce a minimal diff, not reformat the entire file.
+
+### Validation
+
+Before commit, validate:
+1. YAML is syntactically valid (round-trip parse)
+2. Required fields present (`name` on models/columns)
+3. No duplicate column names within a model
+4. Tags are non-empty strings
+5. Test parameters are valid (e.g. `accepted_values` has a `values` list)
+
+---
+
+## Error Handling
+
+| Scenario | Behavior |
+|---|---|
+| ADO API auth failure | Surface error, prompt to check PAT in Databricks Secrets |
+| Branch conflict (`ADOConflictError`) | Notify user, offer to re-fetch and retry |
+| Branch already exists | Ask: reuse existing branch or create new? |
+| YAML parse failure | Show error with line number, block commit |
+| UC table not found for tag sync | Warn per-model, continue with others |
+| SQL warehouse unavailable | Queue tag sync for retry, don't block YAML commit |
+
+---
+
+## Databricks App Deployment
+
+### `app.yaml`
+
+```yaml
+command: ["streamlit", "run", "app.py", "--server.port", "8501"]
+env:
+  - name: ADO_ORG
+    value: "my-org"
+  - name: ADO_PROJECT
+    value: "my-project"
+  - name: ADO_REPO
+    value: "my-dbt-repo"
+  - name: DATABRICKS_WAREHOUSE_ID
+    value: "abc123"
+```
+
+### Secrets
+
+| Secret Scope | Key | Value |
+|---|---|---|
+| `ado` | `pat` | Azure DevOps PAT with Code (Read & Write) scope |
+
+### Permissions
+
+- ADO PAT needs: **Code (Read & Write)**, **Pull Request Threads (Read & Write)**
+- Databricks service principal needs: SQL warehouse access, UC `USE CATALOG/SCHEMA`, `ALTER` on target tables
+
+---
+
+## File Structure
+
+```
+dbt-yaml-editor/
+├── app.py                  # Streamlit entrypoint, page routing
+├── ado_git_client.py       # ADO REST API client (provided)
+├── pages/
+│   ├── editor.py           # Main YAML editor page
+│   ├── tag_sync.py         # Bulk UC tag sync page
+│   └── settings.py         # Configuration page
+├── lib/
+│   ├── yaml_parser.py      # ruamel.yaml wrapper, round-trip helpers
+│   ├── uc_tag_sync.py      # Unity Catalog tag sync logic
+│   ├── config.py           # Load config from env/secrets
+│   └── validators.py       # YAML schema validation
+├── config.yaml             # Default configuration
+├── app.yaml                # Databricks App manifest
+└── requirements.txt
+```
+
+---
+
+## Out of Scope (v1)
+
+- Multi-user conflict resolution (optimistic concurrency via ADO API is sufficient)
+- dbt compile/run from within the app
+- Editing non-YAML dbt files (SQL, macros)
+- Full manifest.json parsing for lineage
+- Role-based access control within the app (rely on Databricks App permissions)
+
+---
+
+## Open Questions
+
+1. **Tag convention** — confirm flat `tag = 'true'` vs delimiter split (`domain:finance` → `domain = 'finance'`), or support both?
+2. **Model-to-table mapping** — rely on naming convention alone, or parse `manifest.json` from a dbt docs artifact for accuracy?
+3. **Reviewers** — hardcoded defaults, or pull from ADO team membership API?
+4. **Bulk edits** — v1 single-file only, or support multi-file atomic commits from the start?

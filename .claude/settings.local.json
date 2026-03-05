@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"import streamlit; import ruamel.yaml; import dotenv; print\\(''All imports OK''\\)\")",
+      "Bash(pip install -r requirements.txt)",
+      "Bash(python -c \":*)"
+    ]
+  }
+}
