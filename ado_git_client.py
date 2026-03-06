@@ -123,6 +123,16 @@ class ADOGitClient:
         self._raise_for_status(resp)
         return resp
 
+    def _json(self, resp: requests.Response) -> dict:
+        """Parse JSON from response, wrapping decode errors."""
+        try:
+            return resp.json()
+        except ValueError as e:
+            raise ADOGitClientError(
+                f"Invalid JSON response from {resp.url} "
+                f"(status {resp.status_code}): {e}"
+            )
+
     def _raise_for_status(self, resp: requests.Response):
         if resp.status_code == 404:
             raise ADONotFoundError(
@@ -157,7 +167,7 @@ class ADOGitClient:
         filter_val = branch.removeprefix("refs/heads/")
         params = self._params(filter=f"heads/{filter_val}")
         resp = self._get("refs", params=params)
-        refs = resp.json().get("value", [])
+        refs = self._json(resp).get("value", [])
 
         full_ref = self._full_ref(branch)
         for ref in refs:
@@ -201,13 +211,13 @@ class ADOGitClient:
             }
         ]
         resp = self._post("refs", json=payload)
-        created = resp.json().get("value", [])
+        created = self._json(resp).get("value", [])
         if created and created[0].get("success", True):
             logger.info(f"Created branch '{new_branch}' from '{source}' at {source_sha}")
             return created[0]
 
         raise ADOGitClientError(
-            f"Failed to create branch '{new_branch}': {resp.json()}"
+            f"Failed to create branch '{new_branch}': {self._json(resp)}"
         )
 
     def delete_branch(self, branch: str) -> dict:
@@ -227,7 +237,7 @@ class ADOGitClient:
         ]
         resp = self._post("refs", json=payload)
         logger.info(f"Deleted branch '{branch}'")
-        return resp.json()
+        return self._json(resp)
 
     # -------------------------------------------------------------------------
     # Items / File Operations
@@ -260,7 +270,7 @@ class ADOGitClient:
             },
         )
         resp = self._get("items", params=params)
-        return resp.json().get("value", [])
+        return self._json(resp).get("value", [])
 
     def list_yaml_files(
         self,
@@ -341,7 +351,7 @@ class ADOGitClient:
             },
         )
         resp = self._get("items", params=params)
-        return resp.json()
+        return self._json(resp)
 
     # -------------------------------------------------------------------------
     # Pushes / Commits
@@ -403,7 +413,7 @@ class ADOGitClient:
         logger.info(
             f"Pushed {change_type} to '{file_path}' on branch '{branch}'"
         )
-        return resp.json()
+        return self._json(resp)
 
     def push_multiple_changes(
         self,
@@ -459,7 +469,7 @@ class ADOGitClient:
         logger.info(
             f"Pushed {len(api_changes)} changes to branch '{branch}'"
         )
-        return resp.json()
+        return self._json(resp)
 
     # -------------------------------------------------------------------------
     # Pull Requests
@@ -511,7 +521,7 @@ class ADOGitClient:
             }
 
         resp = self._post("pullrequests", json=payload)
-        pr = resp.json()
+        pr = self._json(resp)
         pr_id = pr.get("pullRequestId")
         logger.info(f"Created PR #{pr_id}: {title}")
 
@@ -540,7 +550,7 @@ class ADOGitClient:
     def get_pull_request(self, pr_id: int) -> dict:
         """Get PR details by ID."""
         resp = self._get(f"pullrequests/{pr_id}", params=self._params())
-        return resp.json()
+        return self._json(resp)
 
     def list_pull_requests(
         self,
@@ -563,7 +573,7 @@ class ADOGitClient:
             params["searchCriteria.sourceRefName"] = self._full_ref(source_branch)
 
         resp = self._get("pullrequests", params=params)
-        return resp.json().get("value", [])
+        return self._json(resp).get("value", [])
 
     # -------------------------------------------------------------------------
     # Convenience: Full workflow
