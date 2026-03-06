@@ -7,6 +7,11 @@ from dataclasses import dataclass
 from typing import Optional
 
 
+# Well-known Azure CLI public client ID — pre-authorized for Azure DevOps,
+# no app registration required.
+_AZURE_CLI_CLIENT_ID = "04b07795-a710-4e35-9fac-d325c1e6c11c"
+
+
 @dataclass
 class ADOConfig:
     org: str
@@ -17,8 +22,8 @@ class ADOConfig:
     default_branch: str = "main"
     branch_prefix: str = "yaml-edit/"
     # OAuth fields (only used when auth_mode == "oauth")
-    azure_tenant_id: Optional[str] = None
-    azure_client_id: Optional[str] = None
+    azure_tenant_id: str = "organizations"
+    azure_client_id: str = _AZURE_CLI_CLIENT_ID
     azure_client_secret: Optional[str] = None
 
 
@@ -36,11 +41,7 @@ def load_config() -> ADOConfig:
     if auth_mode == "pat":
         if not os.environ.get("ADO_PAT"):
             missing.append("ADO_PAT")
-    elif auth_mode == "oauth":
-        for var in ("AZURE_TENANT_ID", "AZURE_CLIENT_ID"):
-            if not os.environ.get(var):
-                missing.append(var)
-    else:
+    elif auth_mode != "oauth":
         raise EnvironmentError(
             f"Invalid AUTH_MODE '{auth_mode}'. Must be 'pat' or 'oauth'."
         )
@@ -58,7 +59,7 @@ def load_config() -> ADOConfig:
         pat=os.environ.get("ADO_PAT"),
         default_branch=os.environ.get("ADO_DEFAULT_BRANCH", "main"),
         branch_prefix=os.environ.get("ADO_BRANCH_PREFIX", "yaml-edit/"),
-        azure_tenant_id=os.environ.get("AZURE_TENANT_ID"),
-        azure_client_id=os.environ.get("AZURE_CLIENT_ID"),
+        azure_tenant_id=os.environ.get("AZURE_TENANT_ID", "organizations"),
+        azure_client_id=os.environ.get("AZURE_CLIENT_ID", _AZURE_CLI_CLIENT_ID),
         azure_client_secret=os.environ.get("AZURE_CLIENT_SECRET"),
     )
