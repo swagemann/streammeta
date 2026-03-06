@@ -86,9 +86,13 @@ class ADOGitClient:
         org: str,
         project: str,
         repo: str,
-        pat: str,
+        pat: Optional[str] = None,
+        token: Optional[str] = None,
         target_branch: str = "main",
     ):
+        if not pat and not token:
+            raise ValueError("Either 'pat' or 'token' must be provided.")
+
         self.org = org
         self.project = project
         self.repo = repo
@@ -97,7 +101,10 @@ class ADOGitClient:
             f"https://dev.azure.com/{org}/{project}/_apis/git/repositories/{repo}"
         )
         self.session = requests.Session()
-        self.session.auth = ("", pat)
+        if token:
+            self.session.headers["Authorization"] = f"Bearer {token}"
+        else:
+            self.session.auth = ("", pat)
         self.session.headers.update(
             {"Content-Type": "application/json"}
         )

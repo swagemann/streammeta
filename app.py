@@ -9,6 +9,7 @@ import streamlit as st
 from dotenv import load_dotenv
 
 from ado_git_client import ADOGitClient, ADOGitClientError, ADOConflictError
+from lib.auth import render_login_page
 from lib.config import load_config
 from lib.yaml_parser import (
     parse_yaml,
@@ -71,17 +72,31 @@ init_state()
 def connect():
     try:
         cfg = load_config()
-        client = ADOGitClient(
-            org=cfg.org,
-            project=cfg.project,
-            repo=cfg.repo,
-            pat=cfg.pat,
-            target_branch=cfg.default_branch,
-        )
+        st.session_state.config = cfg
+
+        if cfg.auth_mode == "oauth":
+            token = render_login_page(cfg)
+            if token is None:
+                st.stop()
+            client = ADOGitClient(
+                org=cfg.org,
+                project=cfg.project,
+                repo=cfg.repo,
+                token=token,
+                target_branch=cfg.default_branch,
+            )
+        else:
+            client = ADOGitClient(
+                org=cfg.org,
+                project=cfg.project,
+                repo=cfg.repo,
+                pat=cfg.pat,
+                target_branch=cfg.default_branch,
+            )
+
         # test connection by listing refs
         client.get_ref(cfg.default_branch)
         st.session_state.client = client
-        st.session_state.config = cfg
         st.session_state.current_branch = cfg.default_branch
         st.session_state.connected = True
     except EnvironmentError as e:
